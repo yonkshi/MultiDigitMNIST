@@ -2,9 +2,9 @@ import subprocess
 import os
 import os.path as osp
 import numpy as np
-from imageio import imwrite
 import argparse
-
+import matplotlib.pyplot as plt
+import h5py
 mnist_keys = ['train-images-idx3-ubyte', 'train-labels-idx1-ubyte',
               't10k-images-idx3-ubyte', 't10k-labels-idx1-ubyte']
 
@@ -73,68 +73,85 @@ def generator(config):
 
     # extract mnist images and labels
     image, label = extract_mnist(config.mnist_path)
+    print('images extracted')
     h, w = image.shape[1:3]
 
-    # split: train, val, test
-    rs = np.random.RandomState(config.random_seed)
-    num_original_class = len(np.unique(label))
-    num_class = len(np.unique(label))**config.num_digit
-    classes = list(np.array(range(num_class)))
-    rs.shuffle(classes)
-    num_train, num_val, num_test = [
-            int(float(ratio)/np.sum(config.train_val_test_ratio)*num_class)
-            for ratio in config.train_val_test_ratio]
-    train_classes = classes[:num_train]
-    val_classes = classes[num_train:num_train+num_val]
-    test_classes = classes[num_train+num_val:]
+    # # split: train, val, test
+    # rs = np.random.RandomState(config.random_seed)
+    # num_original_class = len(np.unique(label))
+    # num_class = len(np.unique(label))**config.num_digit
+    # classes = list(np.array(range(num_class)))
+    # rs.shuffle(classes)
+    # num_train, num_val, num_test = [
+    #         int(float(ratio)/np.sum(config.train_val_test_ratio)*num_class)
+    #         for ratio in config.train_val_test_ratio]
+    # train_classes = classes[:num_train]
+    # val_classes = classes[num_train:num_train+num_val]
+    # test_classes = classes[num_train+num_val:]
+    #
+    # # label index
+    # indexes = []
+    # for c in range(num_original_class):
+    #     indexes.append(list(np.where(label == c)[0]))
+    #
+    # # generate images for every class
+    # # assert config.image_size[1]//config.num_digit >= w
+    # np.random.seed(config.random_seed)
+    #
+    # if not os.path.exists(config.multimnist_path):
+    #     os.makedirs(config.multimnist_path)
+    #
+    # split_classes = [train_classes, val_classes, test_classes]
+    # count = 1
 
-    # label index
-    indexes = []
-    for c in range(num_original_class):
-        indexes.append(list(np.where(label == c)[0]))
 
-    # generate images for every class
-    assert config.image_size[1]//config.num_digit >= w
-    np.random.seed(config.random_seed)
-
-    if not os.path.exists(config.multimnist_path):
-        os.makedirs(config.multimnist_path)
-
-    split_classes = [train_classes, val_classes, test_classes]
-    count = 1
     for i, split_name in enumerate(['train', 'val', 'test']):
-        path = osp.join(config.multimnist_path, split_name)
+        path = config.multimnist_path
         print('Generat images for {} at {}'.format(split_name, path))
         if not os.path.exists(path):
             os.makedirs(path)
-        for j, current_class in enumerate(split_classes[i]):
-            class_str = str(current_class)
-            class_str = '0'*(config.num_digit-len(class_str))+class_str
-            class_path = osp.join(path, class_str)
-            print('{} (progress: {}/{})'.format(class_path, count, len(classes)))
-            if not os.path.exists(class_path):
-                os.makedirs(class_path)
+        with h5py.File("scattered_mnist.hdf5", "w") as f:
+            num_images = image.shape[0]
+            num_image_per_class = config.num_image_per_class
+            ds = f.create_dataset(split_name,
+                                  shape = (num_image_per_class, *config.image_size),
+                                  chunks = (32, *config.image_size,), # 32 images per batch
+                                  dtype = np.float32,
+                )
+
+            # for j, current_class in enumerate(split_classes[i]):
+            #     class_str = str(current_class)
+            #     class_str = '0'*(config.num_digit-len(class_str))+class_str
+            #     class_path = osp.join(path, class_str)
+            #     print('{} (progress: {}/{})'.format(class_path, count, len(classes)))
+            #     if not os.path.exists(class_path):
+            #         os.makedirs(class_path)
+
             for k in range(config.num_image_per_class):
                 # sample images
-                digits = [int(class_str[l]) for l in range(config.num_digit)]
-                imgs = [np.squeeze(image[np.random.choice(indexes[d])]) for d in digits]
-                background = np.zeros((config.image_size)).astype(np.uint8)
+                # digits = [int(class_str[l]) for l in range(config.num_digit)]
+
+                rand_idx = np.random.randint(0, num_images, size=config.num_digit)
+                imgs = np.squeeze(image[rand_idx, ...])
+                background = np.zeros((config.image_size)).astype(np.float32)
                 # sample coordinates
                 ys = sample_coordinate(config.image_size[0]-h, config.num_digit)
-                xs = sample_coordinate(config.image_size[1]//config.num_digit-w,
+                xs = sample_coordinate(config.image_size[1]-w,
                                        size=config.num_digit)
-                xs = [l*config.image_size[1]//config.num_digit+xs[l]
-                      for l in range(config.num_digit)]
+                # xs = [l*config.image_size[1]//config.num_digit+xs[l]
+                #       for l in range(config.num_digit)]
                 # combine images
                 for i in range(config.num_digit):
-                    background[ys[i]:ys[i]+h, xs[i]:xs[i]+w] = imgs[i]
+                    background[ys[i]:ys[i]+h, xs[i]:xs[i]+w] += imgs[i]
                 # write the image
-                image_path = osp.join(class_path, '{}_{}.png'.format(k, class_str))
+                # image_path = osp.join(class_path, '{}_{}.png'.format(k, class_str))
                 # image_path = osp.join(config.multimnist_path, '{}_{}_{}.png'.format(split_name, k, class_str))
-                imwrite(image_path, background)
-            count += 1
+                background = np.clip(background, 0 , 255)
+                background /= 255 # [0, 255] -> [0, 1]
+                ds[k] = background
 
-    return image, label, indexes
+
+    return image, label
 
 
 def argparser():
