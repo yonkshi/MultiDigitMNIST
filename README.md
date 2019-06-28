@@ -1,5 +1,7 @@
 # Multi-digit MNIST for Few-shot Learning
 
+this is a random scattered mnist generator used for AIR, Sequential AIR and SPAIR. 
+
 `Multi-digit MNIST` generator creates datasets consisting of handwritten digit images from [MNIST](http://yann.lecun.com/exdb/mnist/) for few-shot image classification and meta-learning. It simply samples images from MNIST dataset and put digits together to create images with multiple digits. It also creates training/validation/testing splits (64/20/16 classes for DoubleMNIST and 640/200/160 for TripleMNIST). 
 
 You can generate customized by following the cammands provided in [Usage](https://github.com/shaohua0116/MultiDigitMNIST#usage) to change the number of images in each class, the image size, etc. You can also download generated datasets from [Datasets](https://github.com/shaohua0116/MultiDigitMNIST#datasets).
