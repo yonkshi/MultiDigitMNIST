@@ -5,8 +5,11 @@ import numpy as np
 import argparse
 import matplotlib.pyplot as plt
 import h5py
+import cv2
 mnist_keys = ['train-images-idx3-ubyte', 'train-labels-idx1-ubyte',
               't10k-images-idx3-ubyte', 't10k-labels-idx1-ubyte']
+
+data_subset = ['constant', 'full', [1,5]]
 
 
 def check_mnist_dir(data_dir):
@@ -74,81 +77,101 @@ def generator(config):
     # extract mnist images and labels
     image, label = extract_mnist(config.mnist_path)
     print('images extracted')
-    h, w = image.shape[1:3]
+    h, w = config.digit_size
 
-    # # split: train, val, test
-    # rs = np.random.RandomState(config.random_seed)
-    # num_original_class = len(np.unique(label))
-    # num_class = len(np.unique(label))**config.num_digit
-    # classes = list(np.array(range(num_class)))
     # rs.shuffle(classes)
-    # num_train, num_val, num_test = [
-    #         int(float(ratio)/np.sum(config.train_val_test_ratio)*num_class)
-    #         for ratio in config.train_val_test_ratio]
-    # train_classes = classes[:num_train]
-    # val_classes = classes[num_train:num_train+num_val]
-    # test_classes = classes[num_train+num_val:]
-    #
-    # # label index
-    # indexes = []
-    # for c in range(num_original_class):
-    #     indexes.append(list(np.where(label == c)[0]))
-    #
-    # # generate images for every class
-    # # assert config.image_size[1]//config.num_digit >= w
-    # np.random.seed(config.random_seed)
-    #
-    # if not os.path.exists(config.multimnist_path):
-    #     os.makedirs(config.multimnist_path)
-    #
-    # split_classes = [train_classes, val_classes, test_classes]
-    # count = 1
+    num_class = image.shape[0]
+    num_train, num_val, num_test = [
+            int(float(ratio)/np.sum(config.train_val_test_ratio)*num_class)
+            for ratio in config.train_val_test_ratio]
+
+    dataset = {}
+    dataset['train'] = image[:num_train], label[: num_train]
+    dataset['val'] = image[num_train:num_train+num_val], label[: num_train]
+    dataset['test'] = image[num_train+num_val:], label[: num_train]
+
+    duplicate_detect = set()
+
+    file_name = "scattered_mnist_{}x{}_obj{}x{}.hdf5".format(*config.image_size, *config.digit_size)
+    with h5py.File(file_name, "w") as f:
+        for set_name in ['train', 'val', 'test']:
+            dset_data, dset_label = dataset[set_name]
+            num_images = dset_data.shape[0]
+            num_image_per_set = config.num_image_per_set
+            h5set = f.create_group(set_name)
+
+            for subset in data_subset:
+
+                if subset == 'constant':
+                    num_digit_in_image = [config.max_num_digit] * num_image_per_set
+                    max_num_digit = config.max_num_digit
+                elif subset == 'full':
+                    num_digit_in_image = np.random.randint(1, config.max_num_digit, size=num_image_per_set)
+                    max_num_digit = config.max_num_digit
+                else:
+                    low, high = subset
+                    num_digit_in_image = np.random.randint(low, high, size=num_image_per_set)
+                    subset = '{}-{}'.format(low, high)
+                    max_num_digit = high
+
+                print('processing {}.{}...'.format(set_name, subset), end='')
+
+                all_h5set = h5set.create_group(subset)
+
+                image_set = all_h5set.create_dataset('image'.format(set_name),
+                                      shape = (num_image_per_set, *config.image_size),
+                                      chunks = (32, *config.image_size,), # 32 images per batch
+                                      dtype = np.float32,)
+
+                bbox = all_h5set.create_dataset('bbox'.format(set_name),
+                                      shape = (num_image_per_set, max_num_digit, 4), # X, Y, H, W
+                                        chunks=(32, max_num_digit, 4),  # 32 images per batch
+                                      dtype = np.float32,)
+
+                digit_count = all_h5set.create_dataset('digit_count'.format(set_name),
+                                      shape = (num_image_per_set, 1),
+                                      chunks = (32, 1), # 32 images per batch
+                                      dtype = np.float32,)
 
 
-    for i, split_name in enumerate(['train', 'val', 'test']):
-        path = config.multimnist_path
-        print('Generat images for {} at {}'.format(split_name, path))
-        if not os.path.exists(path):
-            os.makedirs(path)
-        with h5py.File("scattered_mnist.hdf5", "w") as f:
-            num_images = image.shape[0]
-            num_image_per_class = config.num_image_per_class
-            ds = f.create_dataset(split_name,
-                                  shape = (num_image_per_class, *config.image_size),
-                                  chunks = (32, *config.image_size,), # 32 images per batch
-                                  dtype = np.float32,
-                )
+                for k in range(num_image_per_set):
+                    # sample images
 
-            # for j, current_class in enumerate(split_classes[i]):
-            #     class_str = str(current_class)
-            #     class_str = '0'*(config.num_digit-len(class_str))+class_str
-            #     class_path = osp.join(path, class_str)
-            #     print('{} (progress: {}/{})'.format(class_path, count, len(classes)))
-            #     if not os.path.exists(class_path):
-            #         os.makedirs(class_path)
+                    sampled_num_digit = num_digit_in_image[k] # instead of having a fixed number digits, we sample
+                    rand_idx = np.random.randint(0, num_images, size = sampled_num_digit)
+                    imgs = np.squeeze(dset_data[rand_idx, ...], axis=-1)
+                    background = np.zeros((config.image_size)).astype(np.float32)
+                    # sample coordinates
+                    yt = sample_coordinate(config.image_size[0]-h, size = sampled_num_digit)
+                    xt = sample_coordinate(config.image_size[1]-w, size = sampled_num_digit)
+                    # combine images
+                    for i in range(sampled_num_digit):
+                        img = cv2.resize(imgs[i], dsize=tuple(config.digit_size))
+                        background[yt[i]:yt[i]+h, xt[i]:xt[i]+w] += img
 
-            for k in range(config.num_image_per_class):
-                # sample images
-                # digits = [int(class_str[l]) for l in range(config.num_digit)]
 
-                rand_idx = np.random.randint(0, num_images, size=config.num_digit)
-                imgs = np.squeeze(image[rand_idx, ...])
-                background = np.zeros((config.image_size)).astype(np.float32)
-                # sample coordinates
-                ys = sample_coordinate(config.image_size[0]-h, config.num_digit)
-                xs = sample_coordinate(config.image_size[1]-w,
-                                       size=config.num_digit)
-                # xs = [l*config.image_size[1]//config.num_digit+xs[l]
-                #       for l in range(config.num_digit)]
-                # combine images
-                for i in range(config.num_digit):
-                    background[ys[i]:ys[i]+h, xs[i]:xs[i]+w] += imgs[i]
-                # write the image
-                # image_path = osp.join(class_path, '{}_{}.png'.format(k, class_str))
-                # image_path = osp.join(config.multimnist_path, '{}_{}_{}.png'.format(split_name, k, class_str))
-                background = np.clip(background, 0 , 255)
-                background /= 255 # [0, 255] -> [0, 1]
-                ds[k] = background
+                    # write the image
+                    background = np.clip(background, 0 , 255)
+                    background /= 255 # [0, 255] -> [0, 1]
+
+                    digit_count[k] = sampled_num_digit
+
+                    # writing bounding box stuff
+                    ys = np.ones_like(yt) * h
+                    xs = np.ones_like(xt) * w
+                    boxes = np.array([xt, yt, xs, ys]).T
+                    bbox_container = np.ones((max_num_digit, 4)) * -1
+                    bbox_container[:sampled_num_digit] = boxes
+                    bbox[k] = bbox_container
+
+                    image_set[k] = background
+
+                    # For empty set detection
+                    if background.sum() == 0:
+                        print('Duplicate found!! Not Truly Random')
+                        import ipdb; ipdb.set_trace()
+
+                print('Done!')
 
 
     return image, label
@@ -164,13 +187,14 @@ def argparser():
     parser.add_argument('--mnist_path', type=str, default='./datasets/mnist/',
                         help='path to *.gz files')
     parser.add_argument('--multimnist_path', type=str, default='./datasets/multimnist')
-    parser.add_argument('--num_digit', type=int, default=2)
+    parser.add_argument('--max_num_digit', type=int, default=2)
     parser.add_argument('--train_val_test_ratio', type=int, nargs='+',
                         default=[64, 16, 20], help='percentage')
     parser.add_argument('--image_size', type=int, nargs='+',
                         default=[64, 64])
-    parser.add_argument('--num_image_per_class', type=int, default=10000)
+    parser.add_argument('--num_image_per_set', type=int, default=10000)
     parser.add_argument('--random_seed', type=int, default=123)
+    parser.add_argument('--digit_size', type=int, nargs='+', default=[14, 14])
     config = parser.parse_args()
     return config
 
